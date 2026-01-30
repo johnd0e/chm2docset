@@ -186,7 +186,8 @@ func (opts *Options) CreateDatabase() error {
 	}
 	defer stmt.Close()
 	if err = filepath.Walk(opts.ContentPath(), func(path string, info os.FileInfo, err error) error {
-		if strings.HasSuffix(path, ".htm") {
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext == ".htm" || ext == ".html" {
 			b, err := ioutil.ReadFile(path)
 			if err != nil {
 				return err
