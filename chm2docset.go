@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -145,7 +146,16 @@ func (opts *Options) CreateDirectory() error {
 
 // ExtractSource extracts source to destination
 func (opts *Options) ExtractSource() error {
-	cmd := exec.Command("extract_chmLib", opts.SourcePath, opts.ContentPath())
+	source := filepath.Clean(opts.SourcePath)
+	destination := filepath.Clean(opts.ContentPath())
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("hh.exe", "-decompile", destination, source)
+	} else {
+		cmd = exec.Command("extract_chmLib", source, destination)
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
