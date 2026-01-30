@@ -14,7 +14,7 @@ import (
 	"runtime"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var logFatal = log.Fatal
@@ -164,7 +164,7 @@ func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
 	titleRE := regexp.MustCompile("<title>([^<]+)</title>")
 	spacesRE := regexp.MustCompile("[\\s\\t]+")
-	db, err := sql.Open("sqlite3", opts.DatabasePath())
+	db, err := sql.Open("sqlite", opts.DatabasePath())
 	if err != nil {
 		return err
 	}
