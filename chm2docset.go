@@ -212,7 +212,11 @@ func (opts *Options) CreateDatabase() error {
 
 func main() {
 	opts := NewOptions()
-	opts.Clean()
+	if opts == nil {
+		usage()
+		return
+	}
+	failOnError(opts.Clean())
 	failOnError(opts.CreateDirectory())
 	failOnError(opts.ExtractSource())
 	failOnError(opts.CreateDatabase())
