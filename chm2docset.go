@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -242,15 +243,15 @@ func (opts *Options) CreateDatabase() error {
 
 	basePath := opts.ContentPath()
 
-	walkFn := func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if ext == ".htm" || ext == ".html" {
+		ext := filepath.Ext(path)
+		if strings.EqualFold(ext, ".htm") || strings.EqualFold(ext, ".html") {
 			title, err := extractTitle(path)
 			if err != nil {
 				return err
@@ -269,9 +270,9 @@ func (opts *Options) CreateDatabase() error {
 			}
 		}
 		return nil
-	}
+	})
 
-	if err = filepath.Walk(basePath, walkFn); err != nil {
+	if err != nil {
 		return err
 	}
 	return tx.Commit()
