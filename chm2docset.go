@@ -54,6 +54,10 @@ const (
 	CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);
 	CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);
 	`
+
+	// Limit file reading to the first 64KB to find the title.
+	// This covers standard HTML <head> sections without reading the full file.
+	headerReadLimit = 64 * 1024
 )
 
 func usage() {
@@ -214,9 +218,15 @@ func getEncoding(name string) (encoding.Encoding, error) {
 	return enc, err
 }
 
-// extractTitle reads the file, handles encoding, and finds the HTML title
+// extractTitle reads the file header, handles encoding, and finds the HTML title
 func extractTitle(path string) (string, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	b, err := io.ReadAll(io.LimitReader(f, headerReadLimit))
 	if err != nil {
 		return "", err
 	}
