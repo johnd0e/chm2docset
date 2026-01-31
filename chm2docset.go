@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -15,6 +17,10 @@ import (
 	"strings"
 
 	_ "modernc.org/sqlite"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/ianaindex"
+	"golang.org/x/text/transform"
 )
 
 var logFatal = log.Fatal
@@ -159,6 +165,40 @@ func (opts *Options) ExtractSource() error {
 	return cmd.Run()
 }
 
+// helpers
+var metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
+func decodeToUTF8(b []byte) string {
+	searchLimit := len(b)
+	if searchLimit > 4096 {
+		searchLimit = 4096
+	}
+	match := metaCharsetRE.FindSubmatch(b[:searchLimit])
+	if len(match) < 2 {
+		return string(b)
+	}
+	charsetName := strings.ToLower(string(match[1]))
+	if charsetName == "utf-8" || charsetName == "utf8" {
+		return string(b)
+	}
+	enc, err := getEncoding(charsetName)
+	if err != nil {
+		return string(b)
+	}
+	reader := transform.NewReader(bytes.NewReader(b), enc.NewDecoder())
+	decodedBytes, err := io.ReadAll(reader)
+	if err != nil {
+		return string(b)
+	}
+	return string(decodedBytes)
+}
+func getEncoding(name string) (encoding.Encoding, error) {
+	enc, err := ianaindex.MIME.Encoding(name)
+	if err != nil {
+		enc, err = ianaindex.IANA.Encoding(name)
+	}
+	return enc, err
+}
+
 // CreateDatabase creates database
 func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
@@ -192,7 +232,7 @@ func (opts *Options) CreateDatabase() error {
 			if err != nil {
 				return err
 			}
-			content := string(b)
+			content := decodeToUTF8(b)
 			res := titleRE.FindAllStringSubmatch(content, -1)
 			if len(res) >= 1 && len(res[0]) >= 2 {
 				ttl := strings.Replace(res[0][1], "\n", " ", -1)
