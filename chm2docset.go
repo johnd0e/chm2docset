@@ -6,15 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"text/template"
 
 	_ "modernc.org/sqlite"
 
@@ -23,17 +22,40 @@ import (
 	"golang.org/x/text/transform"
 )
 
-var logFatal = log.Fatal
+var (
+	// Pre-compile regex for performance
+	metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
+	safeBundleRE  = regexp.MustCompile(`[^^a-zA-Z\d-_]`)
+	titleRE       = regexp.MustCompile(`(?i)<title>([^<]+)</title>`)
+	spacesRE      = regexp.MustCompile(`[\s\t\r\n]+`)
+)
+
+const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>dashIndexFilePath</key>
+    <string>Welcome.htm</string>
+    <key>CFBundleIdentifier</key>
+    <string>{{.BundleIdentifier}}</string>
+    <key>CFBundleName</key>
+    <string>{{.Basename}}</string>
+    <key>DocSetPlatformFamily</key>
+    <string>{{.Platform}}</string>
+    <key>isDashDocset</key>
+    <true/>
+  </dict>
+</plist>`
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: %s [inputfile]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "usage: %s [options] [inputfile]\n", os.Args[0])
 	flag.PrintDefaults()
 	os.Exit(2)
 }
 
 func failOnError(err error) {
 	if err != nil {
-		logFatal(err)
+		log.Fatal(err)
 	}
 }
 
@@ -44,33 +66,19 @@ type Options struct {
 	SourcePath string
 }
 
-var platform string
-var outdir string
-
-func initFlags() {
-	platform = "unknown"
-	outdir = "./"
-}
-
-func init() {
-	initFlags()
+// parseFlags handles CLI arguments and returns Options
+func parseFlags() *Options {
+	opts := &Options{}
+	flag.StringVar(&opts.Platform, "platform", "unknown", "DocSet Platform Family")
+	flag.StringVar(&opts.Outdir, "out", "./", "Output directory or file path")
 	flag.Usage = usage
-	flag.StringVar(&platform, "platform", platform, "DocSet Platform Family")
-	flag.StringVar(&outdir, "out", outdir, "Output directory or file path")
-}
-
-// NewOptions returns new options
-func NewOptions() *Options {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) != 1 {
 		return nil
 	}
-	return &Options{
-		Outdir:     outdir,
-		Platform:   platform,
-		SourcePath: args[0],
-	}
+	opts.SourcePath = args[0]
+	return opts
 }
 
 // SourceFilename returns source file name
@@ -90,54 +98,42 @@ func (opts *Options) DocsetPath() string {
 	if strings.HasSuffix(opts.Outdir, ".docset") {
 		return opts.Outdir
 	}
-	return path.Join(opts.Outdir, opts.Basename()+".docset")
+	return filepath.Join(opts.Outdir, opts.Basename()+".docset")
 }
 
 // ContentPath returns path to docset resources
 func (opts *Options) ContentPath() string {
-	return path.Join(opts.DocsetPath(), "Contents", "Resources", "Documents")
+	return filepath.Join(opts.DocsetPath(), "Contents", "Resources", "Documents")
 }
 
 // DatabasePath returns path to SQLite3 database
 func (opts *Options) DatabasePath() string {
-	return path.Join(opts.DocsetPath(), "Contents", "Resources", "docSet.dsidx")
+	return filepath.Join(opts.DocsetPath(), "Contents", "Resources", "docSet.dsidx")
 }
 
 // PlistPath returns path to Info.plist
 func (opts *Options) PlistPath() string {
-	return path.Join(opts.DocsetPath(), "Contents", "Info.plist")
+	return filepath.Join(opts.DocsetPath(), "Contents", "Info.plist")
 }
 
 // BundleIdentifier returns bundle identifier of docset bundle
 func (opts *Options) BundleIdentifier() string {
-	safeRE := regexp.MustCompile("[^^a-zA-Z\\d-_]")
-	return "io.ngs.documentation." + safeRE.ReplaceAllString(opts.Basename(), "")
-}
-
-// PlistContent returns plsit content
-func (opts *Options) PlistContent() string {
-	// https://kapeli.com/resources/Info.plist
-	return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>dashIndexFilePath</key>
-    <string>Welcome.htm</string>
-    <key>CFBundleIdentifier</key>
-    <string>` + opts.BundleIdentifier() + `</string>
-    <key>CFBundleName</key>
-    <string>` + opts.Basename() + `</string>
-    <key>DocSetPlatformFamily</key>
-    <string>` + opts.Platform + `</string>
-    <key>isDashDocset</key>
-    <true/>
-  </dict>
-</plist>`
+	return "io.ngs.documentation." + safeBundleRE.ReplaceAllString(opts.Basename(), "")
 }
 
 // WritePlist writes plist file
 func (opts *Options) WritePlist() error {
-	return ioutil.WriteFile(opts.PlistPath(), []byte(opts.PlistContent()), 0644)
+	t, err := template.New("plist").Parse(plistTemplate)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, opts); err != nil {
+		return err
+	}
+
+	return os.WriteFile(opts.PlistPath(), buf.Bytes(), 0644)
 }
 
 // Clean removes existing output
@@ -165,8 +161,6 @@ func (opts *Options) ExtractSource() error {
 	return cmd.Run()
 }
 
-// helpers
-var metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
 func decodeToUTF8(b []byte) string {
 	searchLimit := len(b)
 	if searchLimit > 4096 {
@@ -191,6 +185,7 @@ func decodeToUTF8(b []byte) string {
 	}
 	return string(decodedBytes)
 }
+
 func getEncoding(name string) (encoding.Encoding, error) {
 	enc, err := ianaindex.MIME.Encoding(name)
 	if err != nil {
@@ -202,13 +197,13 @@ func getEncoding(name string) (encoding.Encoding, error) {
 // CreateDatabase creates database
 func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
-	titleRE := regexp.MustCompile("(?i)<title>([^<]+)</title>")
-	spacesRE := regexp.MustCompile(`[\s\t\r\n]+`)
+
 	db, err := sql.Open("sqlite", opts.DatabasePath())
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+
 	sqlStmt := `
 		CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);
 		CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);
@@ -216,25 +211,28 @@ func (opts *Options) CreateDatabase() error {
 	if _, err = db.Exec(sqlStmt); err != nil {
 		return err
 	}
+
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
+
 	stmt, err := tx.Prepare("INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	if err = filepath.Walk(opts.ContentPath(), func(path string, info os.FileInfo, err error) error {
+
+	walkFn := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if info.IsDir() {
-			return err
+			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".htm" || ext == ".html" {
-			b, err := ioutil.ReadFile(path)
+			b, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
@@ -257,14 +255,16 @@ func (opts *Options) CreateDatabase() error {
 			}
 		}
 		return nil
-	}); err != nil {
+	}
+
+	if err = filepath.Walk(opts.ContentPath(), walkFn); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 func main() {
-	opts := NewOptions()
+	opts := parseFlags()
 	if opts == nil {
 		usage()
 		return
