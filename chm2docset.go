@@ -29,10 +29,11 @@ var (
 	metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
 	safeBundleRE  = regexp.MustCompile(`[^^a-zA-Z\d-_]`)
 	titleRE       = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
-	spacesRE      = regexp.MustCompile(`[\s\t\r\n]+`)
+	spacesRE      = regexp.MustCompile(`\s+`)
 )
 
-const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
+const (
+	plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
   <dict>
@@ -48,6 +49,12 @@ const plistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <true/>
   </dict>
 </plist>`
+
+	dbSchema = `
+	CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);
+	CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);
+	`
+)
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "usage: %s [options] [inputfile]\n", os.Args[0])
@@ -127,12 +134,12 @@ func (opts *Options) BundleIdentifier() string {
 func (opts *Options) WritePlist() error {
 	t, err := template.New("plist").Parse(plistTemplate)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse template: %w", err)
 	}
 
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, opts); err != nil {
-		return err
+		return fmt.Errorf("execute template: %w", err)
 	}
 
 	return os.WriteFile(opts.PlistPath(), buf.Bytes(), 0644)
@@ -211,30 +218,35 @@ func extractTitle(path string) (string, error) {
 	return "", nil
 }
 
-// CreateDatabase creates database
+// CreateDatabase creates database and initiates indexing
 func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
 
 	db, err := sql.Open("sqlite", opts.DatabasePath())
 	if err != nil {
-		return err
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer db.Close()
 
-	sqlStmt := `
-		CREATE TABLE searchIndex(id INTEGER PRIMARY KEY, name TEXT, type TEXT, path TEXT);
-		CREATE UNIQUE INDEX anchor ON searchIndex (name, type, path);
-		`
-	if _, err = db.Exec(sqlStmt); err != nil {
-		return err
+	if _, err = db.Exec(dbSchema); err != nil {
+		return fmt.Errorf("create schema: %w", err)
 	}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
+	if err := opts.indexDocs(tx); err != nil {
+		return fmt.Errorf("indexing: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// indexDocs walks the content directory and populates the database
+func (opts *Options) indexDocs(tx *sql.Tx) error {
 	stmt, err := tx.Prepare("INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
@@ -242,40 +254,40 @@ func (opts *Options) CreateDatabase() error {
 	defer stmt.Close()
 
 	basePath := opts.ContentPath()
-
-	err = filepath.WalkDir(basePath, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
 			return nil
 		}
-		ext := filepath.Ext(path)
-		if strings.EqualFold(ext, ".htm") || strings.EqualFold(ext, ".html") {
-			title, err := extractTitle(path)
-			if err != nil {
-				return err
-			}
 
-			if title != "" {
-				relPath, err := filepath.Rel(basePath, path)
-				if err != nil {
-					return err
-				}
-				relPath = filepath.ToSlash(relPath)
-				_, err = stmt.Exec(title, "Guide", relPath)
-				if err != nil {
-					return err
-				}
-			}
+		ext := filepath.Ext(path)
+		if !strings.EqualFold(ext, ".htm") && !strings.EqualFold(ext, ".html") {
+			return nil
 		}
+
+		title, err := extractTitle(path)
+		if err != nil {
+			return err
+		}
+
+		if title == "" {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(basePath, path)
+		if err != nil {
+			return err
+		}
+		relPath = filepath.ToSlash(relPath)
+
+		if _, err = stmt.Exec(title, "Guide", relPath); err != nil {
+			return err
+		}
+
 		return nil
 	})
-
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
 
 func main() {
