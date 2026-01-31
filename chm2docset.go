@@ -202,8 +202,8 @@ func getEncoding(name string) (encoding.Encoding, error) {
 // CreateDatabase creates database
 func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
-	titleRE := regexp.MustCompile("<title>([^<]+)</title>")
-	spacesRE := regexp.MustCompile("[\\s\\t]+")
+	titleRE := regexp.MustCompile("(?i)<title>([^<]+)</title>")
+	spacesRE := regexp.MustCompile(`[\s\t\r\n]+`)
 	db, err := sql.Open("sqlite", opts.DatabasePath())
 	if err != nil {
 		return err
@@ -226,6 +226,12 @@ func (opts *Options) CreateDatabase() error {
 	}
 	defer stmt.Close()
 	if err = filepath.Walk(opts.ContentPath(), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return err
+		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".htm" || ext == ".html" {
 			b, err := ioutil.ReadFile(path)
@@ -235,10 +241,16 @@ func (opts *Options) CreateDatabase() error {
 			content := decodeToUTF8(b)
 			res := titleRE.FindAllStringSubmatch(content, -1)
 			if len(res) >= 1 && len(res[0]) >= 2 {
-				ttl := strings.Replace(res[0][1], "\n", " ", -1)
+				ttl := res[0][1]
 				ttl = spacesRE.ReplaceAllString(ttl, " ")
 				ttl = strings.TrimSpace(ttl)
-				_, err := stmt.Exec(ttl, "Guide", strings.TrimPrefix(path, opts.ContentPath()))
+
+				relPath, err := filepath.Rel(opts.ContentPath(), path)
+				if err != nil {
+					return err
+				}
+				relPath = filepath.ToSlash(relPath)
+				_, err = stmt.Exec(ttl, "Guide", relPath)
 				if err != nil {
 					return err
 				}
