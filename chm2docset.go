@@ -26,7 +26,7 @@ var (
 	// Pre-compile regex for performance
 	metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
 	safeBundleRE  = regexp.MustCompile(`[^^a-zA-Z\d-_]`)
-	titleRE       = regexp.MustCompile(`(?i)<title>([^<]+)</title>`)
+	titleRE       = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
 	spacesRE      = regexp.MustCompile(`[\s\t\r\n]+`)
 )
 
@@ -194,6 +194,20 @@ func getEncoding(name string) (encoding.Encoding, error) {
 	return enc, err
 }
 
+// extractTitle reads the file, handles encoding, and finds the HTML title
+func extractTitle(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := decodeToUTF8(b)
+	match := titleRE.FindStringSubmatch(content)
+	if len(match) >= 2 {
+		return strings.TrimSpace(spacesRE.ReplaceAllString(match[1], " ")), nil
+	}
+	return "", nil
+}
+
 // CreateDatabase creates database
 func (opts *Options) CreateDatabase() error {
 	os.Remove(opts.DatabasePath())
@@ -232,23 +246,18 @@ func (opts *Options) CreateDatabase() error {
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".htm" || ext == ".html" {
-			b, err := os.ReadFile(path)
+			title, err := extractTitle(path)
 			if err != nil {
 				return err
 			}
-			content := decodeToUTF8(b)
-			res := titleRE.FindAllStringSubmatch(content, -1)
-			if len(res) >= 1 && len(res[0]) >= 2 {
-				ttl := res[0][1]
-				ttl = spacesRE.ReplaceAllString(ttl, " ")
-				ttl = strings.TrimSpace(ttl)
 
+			if title != "" {
 				relPath, err := filepath.Rel(opts.ContentPath(), path)
 				if err != nil {
 					return err
 				}
 				relPath = filepath.ToSlash(relPath)
-				_, err = stmt.Exec(ttl, "Guide", relPath)
+				_, err = stmt.Exec(title, "Guide", relPath)
 				if err != nil {
 					return err
 				}
