@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"os"
@@ -203,7 +204,8 @@ func extractTitle(path string) (string, error) {
 	content := decodeToUTF8(b)
 	match := titleRE.FindStringSubmatch(content)
 	if len(match) >= 2 {
-		return strings.TrimSpace(spacesRE.ReplaceAllString(match[1], " ")), nil
+		title := html.UnescapeString(match[1])
+		return strings.TrimSpace(spacesRE.ReplaceAllString(title, " ")), nil
 	}
 	return "", nil
 }
