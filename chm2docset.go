@@ -62,12 +62,6 @@ func usage() {
 	os.Exit(2)
 }
 
-func failOnError(err error) {
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
 // Options options
 type Options struct {
 	Outdir     string
@@ -159,15 +153,32 @@ func (opts *Options) CreateDirectory() error {
 func (opts *Options) ExtractSource() error {
 	source := filepath.Clean(opts.SourcePath)
 	destination := filepath.Clean(opts.ContentPath())
-	var cmd *exec.Cmd
+
+	var bin string
+	var args []string
+
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("hh.exe", "-decompile", destination, source)
+		bin = "hh.exe"
+		args = []string{"-decompile", destination, source}
 	} else {
-		cmd = exec.Command("extract_chmLib", source, destination)
+		bin = "extract_chmLib"
+		args = []string{source, destination}
 	}
+
+	// Check if the binary exists in PATH
+	if _, err := exec.LookPath(bin); err != nil {
+		return fmt.Errorf("dependency missing: %s is required but not found in PATH: %w", bin, err)
+	}
+
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("command execution failed (%s): %w", bin, err)
+	}
+
+	return nil
 }
 
 func decodeToUTF8(b []byte) string {
@@ -290,15 +301,34 @@ func (opts *Options) indexDocs(tx *sql.Tx) error {
 	})
 }
 
-func main() {
+func run() error {
 	opts := parseFlags()
 	if opts == nil {
 		usage()
-		return
+		return nil
 	}
-	failOnError(opts.Clean())
-	failOnError(opts.CreateDirectory())
-	failOnError(opts.ExtractSource())
-	failOnError(opts.CreateDatabase())
-	failOnError(opts.WritePlist())
+
+	if err := opts.Clean(); err != nil {
+		return fmt.Errorf("cleaning output: %w", err)
+	}
+	if err := opts.CreateDirectory(); err != nil {
+		return fmt.Errorf("creating directories: %w", err)
+	}
+	if err := opts.ExtractSource(); err != nil {
+		return fmt.Errorf("extracting source: %w", err)
+	}
+	if err := opts.CreateDatabase(); err != nil {
+		return fmt.Errorf("creating database: %w", err)
+	}
+	if err := opts.WritePlist(); err != nil {
+		return fmt.Errorf("writing plist: %w", err)
+	}
+
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		log.Fatalf("Error: %v", err)
+	}
 }
