@@ -29,7 +29,6 @@ var (
 	metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
 	safeBundleRE  = regexp.MustCompile(`[^^a-zA-Z\d-_]`)
 	titleRE       = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
-	spacesRE      = regexp.MustCompile(`\s+`)
 )
 
 const (
@@ -96,8 +95,7 @@ func (opts *Options) SourceFilename() string {
 // Basename returns file basename
 func (opts *Options) Basename() string {
 	fn := opts.SourceFilename()
-	ext := filepath.Ext(fn)
-	return fn[0 : len(fn)-len(ext)]
+	return strings.TrimSuffix(fn, filepath.Ext(fn))
 }
 
 // DocsetPath returns path to docset bundle
@@ -234,7 +232,7 @@ func extractTitle(path string) (string, error) {
 	match := titleRE.FindStringSubmatch(content)
 	if len(match) >= 2 {
 		title := html.UnescapeString(match[1])
-		return strings.TrimSpace(spacesRE.ReplaceAllString(title, " ")), nil
+		return strings.Join(strings.Fields(title), " "), nil
 	}
 	return "", nil
 }
@@ -290,7 +288,8 @@ func (opts *Options) indexDocs(tx *sql.Tx) error {
 
 		title, err := extractTitle(path)
 		if err != nil {
-			return err
+			log.Printf("Warning: skipping file %s due to error: %v", path, err)
+			return nil
 		}
 
 		if title == "" {
