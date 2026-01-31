@@ -29,6 +29,11 @@ var (
 	metaCharsetRE = regexp.MustCompile(`(?i)<meta\s+[^>]*charset\s*=\s*["']?([a-zA-Z0-9-]+)["']?`)
 	safeBundleRE  = regexp.MustCompile(`[^^a-zA-Z\d-_]`)
 	titleRE       = regexp.MustCompile(`(?i)<title[^>]*>([^<]+)</title>`)
+
+	// Regex for parsing HHK/HHC sitemap files
+	sitemapObjectRE = regexp.MustCompile(`(?is)<object[^>]*>(.*?)</object>`)
+	paramNameRE     = regexp.MustCompile(`(?i)<param\s+name=["']?Name["']?\s+value=["']?([^"'>]+)["']?`)
+	paramLocalRE    = regexp.MustCompile(`(?i)<param\s+name=["']?Local["']?\s+value=["']?([^"'>]+)["']?`)
 )
 
 const (
@@ -57,6 +62,9 @@ const (
 	// Limit file reading to the first 64KB to find the title.
 	// This covers standard HTML <head> sections without reading the full file.
 	headerReadLimit = 64 * 1024
+
+	// Fallback encoding for HHK/HHC files if no charset is specified.
+	defaultSitemapEncoding = "windows-1251"
 )
 
 func usage() {
@@ -183,16 +191,23 @@ func (opts *Options) ExtractSource() error {
 	return nil
 }
 
-func decodeToUTF8(b []byte) string {
+// decodeToUTF8 attempts to detect the encoding from the meta tag and decode to UTF-8.
+func decodeToUTF8(b []byte, fallback string) string {
 	searchLimit := len(b)
 	if searchLimit > 4096 {
 		searchLimit = 4096
 	}
 	match := metaCharsetRE.FindSubmatch(b[:searchLimit])
+	var charsetName string
 	if len(match) < 2 {
-		return string(b)
+		if fallback != "" {
+			charsetName = fallback
+		} else {
+			return string(b)
+		}
+	} else {
+		charsetName = strings.ToLower(string(match[1]))
 	}
-	charsetName := strings.ToLower(string(match[1]))
 	if charsetName == "utf-8" || charsetName == "utf8" {
 		return string(b)
 	}
@@ -228,7 +243,7 @@ func extractTitle(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	content := decodeToUTF8(b)
+	content := decodeToUTF8(b, "")
 	match := titleRE.FindStringSubmatch(content)
 	if len(match) >= 2 {
 		title := html.UnescapeString(match[1])
@@ -264,8 +279,82 @@ func (opts *Options) CreateDatabase() error {
 	return tx.Commit()
 }
 
-// indexDocs walks the content directory and populates the database
+// indexDocs coordinates the indexing process with priority: HHK -> HHC -> Walk
 func (opts *Options) indexDocs(tx *sql.Tx) error {
+	basePath := opts.ContentPath()
+
+	// Helper to find the first file with a specific extension
+	findFileByExt := func(ext string) string {
+		var found string
+		filepath.WalkDir(basePath, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.EqualFold(filepath.Ext(path), ext) {
+				found = path
+				return fs.SkipAll // Stop search after first match
+			}
+			return nil
+		})
+		return found
+	}
+	if hhkPath := findFileByExt(".hhk"); hhkPath != "" {
+		log.Printf("Indexing using HHK file: %s", filepath.Base(hhkPath))
+		return opts.indexSitemap(tx, hhkPath)
+	}
+	if hhcPath := findFileByExt(".hhc"); hhcPath != "" {
+		log.Printf("Indexing using HHC file: %s", filepath.Base(hhcPath))
+		return opts.indexSitemap(tx, hhcPath)
+	}
+	log.Println("No index files found. Scanning HTML files...")
+	return opts.indexHTMLFiles(tx)
+}
+
+// indexSitemap parses HHK or HHC files and indexes content
+func (opts *Options) indexSitemap(tx *sql.Tx, path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	content := decodeToUTF8(b, defaultSitemapEncoding)
+	stmt, err := tx.Prepare("INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	// HHK/HHC files are often messy HTML. We extract <OBJECT> tags regex-based.
+	objects := sitemapObjectRE.FindAllStringSubmatch(content, -1)
+	count := 0
+
+	for _, objMatch := range objects {
+		if len(objMatch) < 2 {
+			continue
+		}
+		objContent := objMatch[1]
+
+		nameMatch := paramNameRE.FindStringSubmatch(objContent)
+		localMatch := paramLocalRE.FindStringSubmatch(objContent)
+
+		if len(nameMatch) >= 2 && len(localMatch) >= 2 {
+			name := html.UnescapeString(nameMatch[1])
+			path := filepath.ToSlash(html.UnescapeString(localMatch[1]))
+
+			name = strings.Join(strings.Fields(name), " ")
+
+			if name != "" && path != "" {
+				if _, err := stmt.Exec(name, "Guide", path); err != nil {
+					return err
+				}
+				count++
+			}
+		}
+	}
+
+	log.Printf("Indexed %d entries from sitemap", count)
+	return nil
+}
+
+// indexHTMLFiles walks the content directory and populates the database from HTML titles
+func (opts *Options) indexHTMLFiles(tx *sql.Tx) error {
 	stmt, err := tx.Prepare("INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
