@@ -232,12 +232,15 @@ func (opts *Options) CreateDatabase() error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 
 	stmt, err := tx.Prepare("INSERT OR IGNORE INTO searchIndex(name, type, path) VALUES (?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
+
+	basePath := opts.ContentPath()
 
 	walkFn := func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -254,7 +257,7 @@ func (opts *Options) CreateDatabase() error {
 			}
 
 			if title != "" {
-				relPath, err := filepath.Rel(opts.ContentPath(), path)
+				relPath, err := filepath.Rel(basePath, path)
 				if err != nil {
 					return err
 				}
@@ -268,7 +271,7 @@ func (opts *Options) CreateDatabase() error {
 		return nil
 	}
 
-	if err = filepath.Walk(opts.ContentPath(), walkFn); err != nil {
+	if err = filepath.Walk(basePath, walkFn); err != nil {
 		return err
 	}
 	return tx.Commit()
